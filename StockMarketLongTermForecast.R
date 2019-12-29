@@ -105,7 +105,7 @@ svm <- train(training %>% select(-dates, -tenyear) %>% as.matrix(),
 
 # Evaluation ----
 
-# Make a tibble for storing the results
+# Make a tibble for storing training set results
 models <- tibble(name = c("glmnet", "xgb", "knn", "mars", "svm"),
                  model = NA,
                  rmse = NA,
@@ -131,6 +131,7 @@ for(i in 1:nrow(models)){
   models$dates_train[i] <- training %>% pull(dates) %>% list()
 }
 
+# Make a tibble for storing test set results
 models_test <- tibble(name = models$name,
                       actual_test = NA,
                       pred_test = NA,
@@ -153,6 +154,48 @@ for(i in 1:nrow(models_test)){
                                         models_test$actual_test[[i]]))
   models_test$dates_test[i] <- test %>% pull(dates) %>% list()
 }
+
+# Put training and test set data into tibble for plotting
+to_plot <- models %>% 
+  select(name, actual, pred, dates_train) %>% 
+  unnest() %>% 
+  mutate(dates = as.Date(paste0(dates_train, "-01")),
+         source = "train") %>% 
+  select(-dates_train)
+
+to_plot <- models_test %>% 
+  select(name, actual = actual_test, pred = pred_test, dates_test) %>% 
+  unnest() %>% 
+  mutate(dates = as.Date(paste0(dates_test, "-01")),
+         source = "test") %>%
+  select(-dates_test) %>% 
+  rbind(to_plot, .)
+
+# Find date where test set begins to be used in plotting
+split_date <- to_plot$dates[first(which(to_plot$source == "test"))]
+
+# Plot actuals and predictions for each model
+to_plot %>% 
+  mutate(actual = actual - 1,
+         pred = pred - 1) %>% 
+  ggplot(aes(x = dates)) +
+  geom_line(aes(y = actual)) +
+  geom_line(aes(y = pred), color = "#00BFC4") +
+  geom_vline(xintercept = split_date,
+             color = "red", alpha = 0.5, size = 1, linetype = "dashed") +
+  scale_x_date(breaks = function(x) seq.Date(from = as.Date("1950-01-01"),
+                                             to = max(x), by = "10 years"),
+               date_labels = "%Y") +
+  facet_grid(rows = vars(name)) +
+  ggtitle("Predicting future 10-year returns for the S&P 500",
+          subtitle = "Actuals vs predictions (blue) for different models") +
+  xlab("Date") +
+  ylab("Yearly average return (CAGR) for the next 10 years") +
+  labs(caption =
+         "Source: Shiller, Goyal, U.S. Bureau of Labor Statistics \n
+Blog post at: databasedinvesting.blogspot.com") +
+  theme_minimal() +
+  theme(plot.caption = element_text(hjust = 0, lineheight = 0.5))
 
 # Make feature importance plots
 for(i in 1:nrow(models)){
