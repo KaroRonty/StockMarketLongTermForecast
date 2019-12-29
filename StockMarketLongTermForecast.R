@@ -2,9 +2,9 @@ library(tidyverse)
 library(corrplot)
 library(GGally)
 library(caret)
-library(glmnet)
 library(doParallel)
 library(parallel)
+library(patchwork)
 
 # Register parallelization using all cores
 registerDoParallel(cores = detectCores())
@@ -77,10 +77,10 @@ cv <- trainControl(method = "timeslice",
                    allowParallel = TRUE)
 
 # Train baseline model using glmnet
-baseline <- train(training %>% select(-dates, -tenyear) %>% as.matrix(),
-                  training %>% pull(tenyear),
-                  method = "glmnet",
-                  trControl = cv)
+glmnet <- train(training %>% select(-dates, -tenyear) %>% as.matrix(),
+                training %>% pull(tenyear),
+                method = "glmnet",
+                trControl = cv)
 
 # Train rest of the models
 xgb <- train(training %>% select(-dates, -tenyear) %>% as.matrix(),
@@ -106,35 +106,78 @@ svm <- train(training %>% select(-dates, -tenyear) %>% as.matrix(),
 # Evaluation ----
 
 # Make a tibble for storing the results
-models <- tibble(name = c("baseline", "xgb", "knn", "mars", "svm"),
+models <- tibble(name = c("glmnet", "xgb", "knn", "mars", "svm"),
+                 model = NA,
                  rmse = NA,
-                 rsq = NA,
-                 mae = NA)
+                 rsq_cv = NA,
+                 mae = NA,
+                 actual = NA,
+                 pred = NA,
+                 dates_train = NA)
 
-# Loop the results into the tibble
+# Loop the models, predictions and accuracy measures into the tibble
 for(i in 1:nrow(models)){
+  models$model[i] <- get(models$name[i]) %>% list()
   models$rmse[i] <- get(models$name[i])$resample$RMSE %>% mean(na.rm = TRUE)
-  models$rsq[i] <- get(models$name[i])$resample$Rsquared %>% mean(na.rm = TRUE)
+  models$rsq_cv[i] <- get(models$name[i])$resample$Rsquared %>% mean(na.rm = TRUE)
   models$mae[i] <- get(models$name[i])$resample$MAE %>% mean(na.rm = TRUE)
+  models$actual[i] <- training %>% pull(tenyear) %>% list()
+  models$pred[i] <- predict(get(models$name[i]),
+                            training %>%
+                              select(-dates, -tenyear) %>%
+                              as.matrix()) %>%
+    as.vector() %>% 
+    list()
+  models$dates_train[i] <- training %>% pull(dates) %>% list()
 }
 
-# Calculate feature importances for the baseline model
-feature_importance <- varImp(baseline$finalModel)
+models_test <- tibble(name = models$name,
+                      actual_test = NA,
+                      pred_test = NA,
+                      rsq_test = NA,
+                      mae_test = NA,
+                      dates_test = NA)
 
-# Convert type while keeping names and arrange
-feature_importance <- feature_importance %>% 
-  mutate(Variable = row.names(.),
-         Importance = as.numeric(Overall)) %>%
-  select(-Overall) %>%
-  arrange(-Importance) %>% 
-  mutate(Variable = Variable %>% reorder(Importance),
-         Importance = (Importance - min(Importance)) / 
-           max(Importance) - min(Importance)) 
+# Loop the models, predictions and accuracy measures into the tibble
+for(i in 1:nrow(models_test)){
+  models_test$actual_test[i] <- test %>% pull(tenyear) %>% list()
+  models_test$pred_test[i] <- predict(get(models_test$name[i]),
+                                      test %>%
+                                        select(-dates, -tenyear) %>%
+                                        as.matrix()) %>%
+    as.vector() %>% 
+    list()
+  models_test$rsq_test[i] <- cor(models_test$actual_test[[i]],
+                                 models_test$pred_test[[i]])^2
+  models_test$mae_test[i] <- mean(abs(models_test$pred_test[[i]] -
+                                        models_test$actual_test[[i]]))
+  models_test$dates_test[i] <- test %>% pull(dates) %>% list()
+}
 
-# Produce plot
-feature_importance %>% 
-  ggplot(aes(x = Variable,
-             y = Importance)) +
-  geom_col() +
-  coord_flip() +
-  theme_light()
+# Make feature importance plots
+for(i in 1:nrow(models)){
+  # Calculate feature importances for the model
+  feature_importance <- varImp(get(models$name[i]))$importance
+  
+  # Convert type while keeping names and arrange
+  feature_importance <- feature_importance %>% 
+    mutate(Variable = row.names(.),
+           Importance = as.numeric(Overall)) %>%
+    select(-Overall) %>%
+    mutate(Importance = (Importance - min(Importance)) / 
+             max(Importance) - min(Importance)) 
+  
+  # Produce plot
+  p <- feature_importance %>% 
+    ggplot(aes(x = Variable,
+               y = Importance)) +
+    geom_col() +
+    coord_flip() +
+    ggtitle(models$name[i]) +
+    theme_light()
+  
+  assign(paste0("p", i), p)
+}
+
+# Plot feature importances using patchwork
+p1 + p2 + p3 + p4 + p5
