@@ -74,7 +74,6 @@ cv <- trainControl(method = "timeslice",
                    horizon = 29,
                    skip = 65 + 29 - 1,
                    fixedWindow = TRUE,
-                   savePredictions = "all", # FIXME
                    allowParallel = TRUE)
 
 # Train baseline model using glmnet
