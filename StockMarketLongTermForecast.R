@@ -5,6 +5,7 @@ library(caret)
 library(doParallel)
 library(parallel)
 library(patchwork)
+library(scales)
 
 # Register parallelization using all cores
 registerDoParallel(cores = detectCores())
@@ -83,10 +84,10 @@ glmnet <- train(training %>% select(-dates, -tenyear) %>% as.matrix(),
                 trControl = cv)
 
 # Train rest of the models
-xgb <- train(training %>% select(-dates, -tenyear) %>% as.matrix(),
-             training %>% pull(tenyear),
-             method = "xgbTree",
-             trControl = cv)
+xgboost <- train(training %>% select(-dates, -tenyear) %>% as.matrix(),
+                 training %>% pull(tenyear),
+                 method = "xgbTree",
+                 trControl = cv)
 
 knn <- train(training %>% select(-dates, -tenyear) %>% as.matrix(),
              training %>% pull(tenyear),
@@ -106,21 +107,17 @@ svm <- train(training %>% select(-dates, -tenyear) %>% as.matrix(),
 # Evaluation ----
 
 # Make a tibble for storing training set results
-models <- tibble(name = c("glmnet", "xgb", "knn", "mars", "svm"),
+models <- tibble(name = c("glmnet", "xgboost", "knn", "mars", "svm"),
                  model = NA,
-                 rmse = NA,
-                 rsq_cv = NA,
-                 mae = NA,
                  actual = NA,
                  pred = NA,
+                 rsq_cv = NA,
+                 mae_cv = NA,
                  dates_train = NA)
 
 # Loop the models, predictions and accuracy measures into the tibble
 for(i in 1:nrow(models)){
   models$model[i] <- get(models$name[i]) %>% list()
-  models$rmse[i] <- get(models$name[i])$resample$RMSE %>% mean(na.rm = TRUE)
-  models$rsq_cv[i] <- get(models$name[i])$resample$Rsquared %>% mean(na.rm = TRUE)
-  models$mae[i] <- get(models$name[i])$resample$MAE %>% mean(na.rm = TRUE)
   models$actual[i] <- training %>% pull(tenyear) %>% list()
   models$pred[i] <- predict(get(models$name[i]),
                             training %>%
@@ -128,6 +125,8 @@ for(i in 1:nrow(models)){
                               as.matrix()) %>%
     as.vector() %>% 
     list()
+  models$rsq_cv[i] <- get(models$name[i])$resample$Rsquared %>% mean(na.rm = TRUE)
+  models$mae_cv[i] <- get(models$name[i])$resample$MAE %>% mean(na.rm = TRUE)
   models$dates_train[i] <- training %>% pull(dates) %>% list()
 }
 
@@ -137,6 +136,7 @@ models_test <- tibble(name = models$name,
                       pred_test = NA,
                       rsq_test = NA,
                       mae_test = NA,
+                      pred_future = NA,
                       dates_test = NA)
 
 # Loop the models, predictions and accuracy measures into the tibble
@@ -171,6 +171,15 @@ to_plot <- models_test %>%
   select(-dates_test) %>% 
   rbind(to_plot, .)
 
+# Add ensemble model predictions
+to_plot <- to_plot %>% 
+  pivot_wider(names_from = name,
+              values_from = pred) %>% 
+  mutate(name = "ensemble",
+         pred = (glmnet + knn + mars + svm + xgboost) / 5) %>% 
+  select(name, actual, pred, dates, source) %>% 
+  rbind(to_plot)
+
 # Find date where test set begins to be used in plotting
 split_date <- to_plot$dates[first(which(to_plot$source == "test"))]
 
@@ -186,6 +195,7 @@ to_plot %>%
   scale_x_date(breaks = function(x) seq.Date(from = as.Date("1950-01-01"),
                                              to = max(x), by = "10 years"),
                date_labels = "%Y") +
+  scale_y_continuous(labels = scales::percent) +
   facet_grid(rows = vars(name)) +
   ggtitle("Predicting future 10-year returns for the S&P 500",
           subtitle = "Actuals vs predictions (blue) for different models") +
@@ -196,6 +206,57 @@ to_plot %>%
 Blog post at: databasedinvesting.blogspot.com") +
   theme_minimal() +
   theme(plot.caption = element_text(hjust = 0, lineheight = 0.5))
+
+# Find out emsemble model accuracy on test set
+ensemble_accuracy <- to_plot %>% 
+  filter(name == "ensemble",
+         source == "test") %>% 
+  summarise(rsq_test = cor(actual, pred)^2,
+            mae_test = mean(abs(pred - actual)))
+
+# Find out MAE of naive model
+naive_mae <- to_plot %>% 
+  filter(name == "ensemble") %>% # Does not matter which model
+  pivot_wider(names_from = source,
+              values_from = c(actual, pred)) %>% 
+  # Compare past historical (training set) return to test set return
+  summarise(mae_test = mean(abs(mean(actual_train, na.rm = TRUE) -
+                                  actual_test), na.rm = TRUE))
+
+# Make future data using current values
+future <- full_data %>%
+  full_join(bls_data, by = "dates") %>%
+  mutate("PE" = P / E,
+         "PB" = 1 / as.numeric(bm),
+         "PD" = P / D,
+         "TR_CAPE" = as.numeric(`TR CAPE`),
+         "Rate_GS10" = `Rate GS10`) %>% 
+  tail(1) %>% 
+  select(-P:-Fraction,
+         -Price:-Earnings,
+         -diff,
+         -bm,
+         -index:-tenyear_real,
+         -div_percent,
+         tenyear,
+         -`TR CAPE`,
+         -`Rate GS10`) %>% 
+  mutate(infl = 0.021,
+         UnEmp = 3.5,
+         PE = 24.27,
+         PB = 3.66,
+         PD = 1 / 0.0177)
+
+# Loop future predictions to models_test tibble
+for(i in 1:nrow(models_test)){
+  models_test$pred_future[i] <- predict(get(models_test$name[i]),
+                                        future %>%
+                                          select(-dates, -tenyear) %>%
+                                          as.matrix())
+}
+
+# Calculate ensemble prediction
+ensemble_pred <- models_test$pred_future %>% mean()
 
 # Make feature importance plots
 for(i in 1:nrow(models)){
@@ -224,3 +285,10 @@ for(i in 1:nrow(models)){
 
 # Plot feature importances using patchwork
 p1 + p2 + p3 + p4 + p5
+
+# Print all details
+print(models)
+print(models_test)
+print(naive_mae)
+print(ensemble_accuracy)
+print(ensemble_pred)
